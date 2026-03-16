@@ -4,8 +4,6 @@ Reference morphometric data from classic studies for comparison with LAPDMouse.
 Sources:
 - Weibel (1963): Human symmetric lung model, "Morphometry of the Human Lung"
 - Islam et al. (2017): BALB/c mouse lung, Anatomical Record 300:2046-2057
-- Oldham & Robinson (2007): BALB/c mouse lung averages
-- Raabe et al. (1976): Rat lung morphometry (if OCR data becomes available)
 
 Note: All diameters and lengths are in millimeters (mm) for consistency.
 Generation 0 = trachea for human Weibel model, generation 1 = trachea for mouse models.
@@ -153,8 +151,8 @@ def normalize_by_trachea(df, diameter_col='diameter_mm', length_col='length_mm')
     return df
 
 
-def get_all_mouse_references():
-    """Return a combined DataFrame of all mouse reference data."""
+def get_mouse_references():
+    """Return mouse reference data."""
     return ISLAM_BALBC_2017.copy()
 
 
