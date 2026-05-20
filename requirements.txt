@@ -5,3 +5,4 @@ scipy>=1.11
 tqdm>=4.64
 jupyter
 notebook
+pytest>=7

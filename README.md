@@ -1,109 +1,141 @@
 # markov-deposition-lapdmouse
 
-Code accompanying the article:
+Minimum reproducible code for the manuscript:
 
-> **Evaluation of analytical particle deposition models against experimental mouse lung data**  
-> Martin Puig, Nicolas Molinari, Eric Matzner-Løber
+> Evaluation of analytical particle deposition models against experimental mouse lung data
 
-## Overview
+The repository keeps only the code needed to rerun the LAPDMouse deposition model and regenerate the publication figure set. Generated results and figures are intentionally excluded from git.
 
-This repository implements a probabilistic Markov chain model for particle deposition in mouse airway trees and evaluates the sensitivity of its predictions to the choice of impaction formula (Chan-Lippmann, Yeh-Schum, Zhang variants) against the [LAPDMouse dataset](https://lapdmouse.iibi.uiowa.edu/), which provides spatially resolved, per-airway particle deposition counts across 34 mice for 0.5, 1, and 2 µm particles.
+## Contents
 
-## Repository structure
-
+```text
+scripts/
+  model_deposition.py          Core Markov-chain deposition model
+  compare_impaction_models.py  Simulation CLI
+  sensitivity_helpers.py       Flow-split, lobe, strain, and scaling helpers
+  figure_helpers.py            Shared figure-generation code
+data/
+  morphometry_references.py
+  islam_2017_generation_averages.csv
+  heyder_deposition_transition.csv
+notebooks/
+  generate_figures.ipynb       One configurable notebook for all figure variants
 ```
-markov-deposition-paper/
-├── scripts/
-│   ├── model_deposition.py          # Core Markov chain deposition model
-│   └── compare_impaction_models.py  # Compare impaction model variants
-├── data/
-│   └── morphometry_references.py    # Reference morphometric data (Weibel, Islam et al.)
-├── notebooks/
-│   └── tutorial.ipynb               # Step-by-step tutorial
-└── requirements.txt
-```
 
-## Requirements
+## Setup
 
 ```bash
+python3 -m venv .venv
+. .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Dependencies: `numpy`, `pandas`, `matplotlib`, `scipy`, `tqdm`, `jupyter`.
+The full reproduction uses the external LAPDMouse dataset. Download it from the official LAPDMouse archive and arrange it as:
 
-## Data
-
-The scripts require the LAPDMouse dataset. Download it from https://lapdmouse.iibi.uiowa.edu/ and organize it as follows:
-
-```
-data_path/
-├── m01/
-│   ├── m01_Info.md
-│   ├── m01_AirwayTreeTable.csv
-│   ├── m01_AirwaySegmentsDeposition.csv
-│   ├── m01_Ventilation_Pre.csv
-│   ├── m01_Ventilation_Post1.csv
-│   └── m01_Ventilation_Post2.csv
-├── m02/
-│   └── ...
-└── ...
+```text
+/path/to/lapdMouseDB/
+  m01/
+    m01_Info.md
+    m01_AirwayTreeTable.csv
+    m01_AirwaySegmentsDeposition.csv
+    m01_Ventilation_Pre.csv
+    ...
+  m02/
+  ...
 ```
 
-## Usage
+## Run Simulations
 
-### Compare impaction models
+Baseline area-flow split:
 
 ```bash
-cd scripts
-
-python compare_impaction_models.py \
-    --data_path /path/to/lapdmouse/data \
-    --results_path /path/to/output \
-    --particle_sizes 5e-7 1e-6 2e-6 \
-    --impaction_models chan_lipp yeh_schum zhang \
-    --use_mouse_ventilation
+python scripts/compare_impaction_models.py \
+  --data_path /path/to/lapdMouseDB \
+  --results_path results_area \
+  --use_mouse_ventilation \
+  --particle_sizes 5e-7 1e-6 2e-6 \
+  --impaction_models chan_lipp zhang yeh_schum \
+  --flow_split area
 ```
 
-**Key arguments:**
+Area split with TLC-to-tidal scaling from generation 4:
 
-| Argument | Default | Description |
-|---|---|---|
-| `--data_path` | *(required)* | Path to the LAPDMouse data directory |
-| `--results_path` | *(required)* | Output directory for results and figures |
-| `--particle_sizes` | `1e-6` | Particle diameters in meters (space-separated) |
-| `--impaction_models` | `chan_lipp zhang yeh_schum` | Impaction formula(s) to compare |
-| `--use_mouse_ventilation` | False | Use per-mouse breathing parameters (RR, Vt, I:E) |
-| `--Q_intake` | `2.08e-6` | Intake flow rate in m³/s (ignored if `--use_mouse_ventilation`) |
-| `--mice_ids` | all | Subset of mouse IDs to process |
-| `--use_outlet_area` | False | Use outlet area in flow calculations |
+```bash
+python scripts/compare_impaction_models.py \
+  --data_path /path/to/lapdMouseDB \
+  --results_path results_area_scaled_gen4 \
+  --use_mouse_ventilation \
+  --particle_sizes 5e-7 1e-6 2e-6 \
+  --impaction_models chan_lipp zhang yeh_schum \
+  --flow_split area \
+  --tlc_to_tidal_scaling
+```
 
-### Use the model directly
+Volume split with TLC-to-tidal scaling from generation 4:
+
+```bash
+python scripts/compare_impaction_models.py \
+  --data_path /path/to/lapdMouseDB \
+  --results_path results_vsplit_scaled_gen4 \
+  --use_mouse_ventilation \
+  --particle_sizes 5e-7 1e-6 2e-6 \
+  --impaction_models chan_lipp zhang yeh_schum \
+  --flow_split volume \
+  --tlc_to_tidal_scaling
+```
+
+For TLC-to-tidal scaling, `--vt_strain_table` is optional. If the file is absent, the script computes strain-mean tidal volumes from the supplied LAPDMouse metadata and writes `strain_ventilation_table.csv` into the result folder.
+
+## Regenerate Figures
+
+Open `notebooks/generate_figures.ipynb` and edit only the config cell:
 
 ```python
-from pathlib import Path
-from scripts.model_deposition import (
-    load_trees, propagate_flow, compute_probabilities,
-    propagate_probabilities, compute_generation
-)
-
-data = load_trees(Path("/path/to/data"), mice_list=["m01"], Q_intake=2.08e-6)
-tree = data["m01"]["tree_table"]
-
-tree = propagate_flow(tree)
-tree = compute_generation(tree)
-tree = compute_probabilities(tree, particle_size=1e-6, impaction_model="chan_lipp")
-tree = propagate_probabilities(tree)
+RESULTS_PATH = "../results_area"
+OUTPUT_DIR = "../outputs"
+OUTPUT_SUFFIX = ""
 ```
 
-See `notebooks/tutorial.ipynb` for a full walkthrough.
+For variants, keep the notebook code unchanged and switch only:
 
-## Impaction models
+```python
+RESULTS_PATH = "../results_area_scaled_gen4"
+OUTPUT_SUFFIX = "area_scaled_gen4"
+```
 
-Three variants of the impaction efficiency formula are implemented:
+or:
 
-- **Chan-Lippmann** (`chan_lipp`): Chan & Lippmann (1980)
-- **Yeh-Schum** (`yeh_schum`): Yeh & Schum (1980)
-- **Zhang** (`zhang`): Zhang et al. (1997)
+```python
+RESULTS_PATH = "../results_vsplit_scaled_gen4"
+OUTPUT_SUFFIX = "vsplit_scaled_gen4"
+```
+
+The notebook writes figures such as:
+
+```text
+comparison_hq_05m.png
+comparison_hq_1m.png
+comparison_hq_2m.png
+dep_per_gen_05_variability.png
+dep_per_lobe_1_area_scaled_gen4.png
+stat_heatmap_bh_2_vsplit_scaled_gen4.png
+deposition_gt.png
+deposition_gt_density.png
+deposition_transition.png
+dep_per_gen_gt.png
+dep_per_gen_gt_by_strain.png
+morphometry_absolute_diameter.png
+morphometry_normalized_diameter.png
+stk_impaction_vs_generation.png
+```
+
+## Smoke Tests
+
+The fixture is synthetic and only checks code health, not scientific results.
+
+```bash
+pytest
+```
 
 ## License
 
