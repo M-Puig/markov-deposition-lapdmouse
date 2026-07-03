@@ -1,0 +1,31 @@
+{
+  "title": "Evaluation of analytical particle deposition models against experimental mouse lung data — reproduction code",
+  "description": "Minimum reproducible code for the manuscript \"Evaluation of analytical particle deposition models against experimental mouse lung data\". It reproduces the paper's main-text figures and numeric results from the LAPDMouse dataset using a Markov-chain particle-deposition model (three impaction kernels, a piecewise flow split, and TLC-to-tidal geometry scaling). See the repository README for setup, the single reproduction command, and a figure-to-paper map.",
+  "upload_type": "software",
+  "license": "MIT",
+  "access_right": "open",
+  "creators": [
+    {
+      "name": "Puig, Martin",
+      "affiliation": "Université de Montpellier, IDESP",
+      "orcid": "0009-0000-0247-4021"
+    }
+  ],
+  "keywords": [
+    "particle deposition",
+    "aerosol",
+    "lung",
+    "mouse airway",
+    "LAPDMouse",
+    "Markov chain model",
+    "impaction models",
+    "reproducibility"
+  ],
+  "related_identifiers": [
+    {
+      "identifier": "https://github.com/M-Puig/markov-deposition-lapdmouse",
+      "relation": "isSupplementTo",
+      "scheme": "url"
+    }
+  ]
+}

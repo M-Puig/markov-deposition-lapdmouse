@@ -1,11 +1,22 @@
-cff-version: 1.1.0
-message: "If you use this software, please cite it as below."
+cff-version: 1.2.0
+message: "If you use this software, please cite the associated paper (below) and, if you need to reference a specific archived version, the Zenodo record."
+title: "markov-deposition-lapdmouse: reproduction code for 'Evaluation of analytical particle deposition models against experimental mouse lung data'"
+type: software
 authors:
-- family-names: Puig
-  given-names: Martin
-orcid: https://orcid.org/0009-0000-0247-4021
-title: Evaluation of analytical particle deposition models against experimental mouse lung data: Code repository
-version: 1.0
+  - family-names: Puig
+    given-names: Martin
+    orcid: "https://orcid.org/0009-0000-0247-4021"
+    affiliation: "Université de Montpellier, IDESP"
+repository-code: "https://github.com/M-Puig/markov-deposition-lapdmouse"
+license: MIT
+version: "1.0.1"
 date-released: 2026-07-03
-                                
-
+preferred-citation:
+  type: article
+  title: "Evaluation of analytical particle deposition models against experimental mouse lung data"
+  authors:
+    - family-names: Puig
+      given-names: Martin
+      orcid: "https://orcid.org/0009-0000-0247-4021"
+      affiliation: "Université de Montpellier, IDESP"
+  year: 2026
