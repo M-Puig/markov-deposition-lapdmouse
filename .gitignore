@@ -7,7 +7,6 @@ results*/
 results_*/
 outputs/
 outputs*/
-tests/
 .DS_Store
 .ipynb_checkpoints/
 *.egg-info/

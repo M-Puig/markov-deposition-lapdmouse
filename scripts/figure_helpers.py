@@ -25,10 +25,12 @@ MODEL_LABELS = {
     "yeh_schum": "Yeh-Schum",
     "zhang": "Zhang",
 }
+# Paul Tol high-contrast palette (load_cmap("highcontrast") in the paper):
+# cmap(0)=chan_lipp, cmap(1)=zhang, cmap(2)=yeh_schum.
 MODEL_COLORS = {
-    "chan_lipp": "#1f77b4",
-    "yeh_schum": "#2ca02c",
-    "zhang": "#ff7f0e",
+    "chan_lipp": "#004488",
+    "yeh_schum": "#BB5566",
+    "zhang": "#DDAA33",
 }
 PARTICLE_SIZES_UM = [0.5, 1.0, 2.0]
 MAX_GEN = 25
@@ -311,9 +313,24 @@ def _sum_descendants(df: pd.DataFrame, root_label: int, value_col: str) -> float
     return total
 
 
-def lobe_fraction_tables(all_dep: pd.DataFrame, all_gt: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+def lobe_fraction_tables(all_dep: pd.DataFrame, all_gt: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Per-mouse lobe-wise **deposition density** distributions, matching the
+    paper's lobe figures. For each of the five lobes the captured-particle
+    total is summed over the whole lobe subtree and divided by that subtree's
+    segmented-airway surface area, then normalised across the five lobes. The
+    same surface-area normalisation is applied to the experimental ground truth.
+
+    Returns
+    -------
+    model_lobes, gt_lobes, area_lobes
+        Long tables of normalised fractions. ``area_lobes`` holds the
+        (size-independent) segmented surface-area distribution used as the
+        grey reference bar.
+    """
     model_rows = []
     gt_rows = []
+    area_rows = []
     for mouse_id, dep_mouse in all_dep.groupby("mouse_id"):
         root_rows = []
         for lobe in LOBES:
@@ -325,62 +342,149 @@ def lobe_fraction_tables(all_dep: pd.DataFrame, all_gt: pd.DataFrame) -> tuple[p
         gt_mouse = all_gt[all_gt["mouse_id"] == mouse_id] if not all_gt.empty else pd.DataFrame()
         gt_size = dep_mouse["gt_particle_size"].dropna().iloc[0] if dep_mouse["gt_particle_size"].notna().any() else None
 
+        # Segmented surface area per lobe (from the ground-truth `area` column).
+        area = np.array(
+            [_sum_descendants(gt_mouse, label, "area") for _, label in root_rows], dtype=float
+        ) if not gt_mouse.empty else np.zeros(len(root_rows))
+        have_area = area.sum() > 0
+
+        def _density(values: np.ndarray) -> np.ndarray:
+            out = np.where(area > 0, values / np.where(area > 0, area, 1.0), 0.0) if have_area else values
+            total = out.sum()
+            return out / total if total > 0 else out
+
+        if have_area:
+            area_frac = area / area.sum()
+            for (lobe, _), val in zip(root_rows, area_frac):
+                area_rows.append({"mouse_id": mouse_id, "lobe": lobe, "fraction": float(val)})
+
         for size_um in PARTICLE_SIZES_UM:
             size_m = size_um * 1e-6
             for model in MODEL_ORDER:
                 col = f"{model}_deposition_{size_m:.2e}"
                 if col not in dep_mouse:
                     continue
-                vals = np.array([_sum_descendants(dep_mouse, label, col) for _, label in root_rows], dtype=float)
-                total = vals.sum()
-                if total > 0:
-                    vals = vals / total
+                vals = _density(np.array([_sum_descendants(dep_mouse, label, col) for _, label in root_rows], dtype=float))
                 for (lobe, _), val in zip(root_rows, vals):
                     model_rows.append({
                         "mouse_id": mouse_id,
                         "particle_size": size_um,
                         "model": model,
                         "lobe": lobe,
-                        "fraction": val,
+                        "fraction": float(val),
                     })
 
             if gt_size is not None and np.isclose(gt_size, size_um) and not gt_mouse.empty:
-                vals = np.array([_sum_descendants(gt_mouse, label, "probability") for _, label in root_rows], dtype=float)
-                total = vals.sum()
-                if total > 0:
-                    vals = vals / total
+                vals = _density(np.array([_sum_descendants(gt_mouse, label, "probability") for _, label in root_rows], dtype=float))
                 for (lobe, _), val in zip(root_rows, vals):
                     gt_rows.append({
                         "mouse_id": mouse_id,
                         "particle_size": size_um,
                         "lobe": lobe,
-                        "fraction": val,
+                        "fraction": float(val),
                     })
-    return pd.DataFrame(model_rows), pd.DataFrame(gt_rows)
+    return pd.DataFrame(model_rows), pd.DataFrame(gt_rows), pd.DataFrame(area_rows)
+
+
+# Sizes with enough ground-truth samples for lobe-wise significance testing.
+STAT_SIZES = [1.0, 2.0]
+
+
+def _paired_wilcoxon(pred: pd.DataFrame, gt: pd.DataFrame, lobe: str) -> tuple[float, float]:
+    """Mean signed error (percentage points) and Wilcoxon signed-rank p-value of
+    predicted-minus-observed lobe fractions, paired by mouse."""
+    merged = pred[pred["lobe"] == lobe][["mouse_id", "fraction"]].merge(
+        gt[gt["lobe"] == lobe][["mouse_id", "fraction"]], on="mouse_id", suffixes=("_pred", "_gt"))
+    if merged.empty:
+        return np.nan, np.nan
+    diff = (merged["fraction_pred"] - merged["fraction_gt"]).to_numpy()
+    mean_err = float(diff.mean() * 100.0)
+    if np.all(diff == 0) or len(diff) < 5:
+        return mean_err, np.nan
+    try:
+        return mean_err, float(stats.wilcoxon(diff).pvalue)
+    except ValueError:
+        return mean_err, np.nan
+
+
+def lobe_significance_table(model_lobes: pd.DataFrame, gt_lobes: pd.DataFrame,
+                            area_lobes: pd.DataFrame) -> pd.DataFrame:
+    """
+    Lobe-wise signed errors and paired Wilcoxon significance versus the
+    experimental ground truth, following the paper: the surface-area
+    distribution is included alongside the three kernels, and a single
+    Benjamini-Hochberg correction is applied across every comparison (sizes
+    {1, 2} um x {3 kernels + surface area} x 5 lobes).
+    """
+    records = []
+    for size_um in STAT_SIZES:
+        gt = gt_lobes[gt_lobes["particle_size"] == size_um] if not gt_lobes.empty else pd.DataFrame(columns=["mouse_id", "lobe", "fraction"])
+        for model in MODEL_ORDER:
+            pred = model_lobes[(model_lobes["particle_size"] == size_um) & (model_lobes["model"] == model)]
+            for lobe in LOBES:
+                mean_err, p = _paired_wilcoxon(pred, gt, lobe)
+                records.append({"particle_size": size_um, "source": model, "lobe": lobe, "mean_err": mean_err, "p": p})
+        for lobe in LOBES:
+            mean_err, p = _paired_wilcoxon(area_lobes, gt, lobe)
+            records.append({"particle_size": size_um, "source": "surface_area", "lobe": lobe, "mean_err": mean_err, "p": p})
+    df = pd.DataFrame(records)
+    df["q"] = _bh_adjust(df["p"].to_numpy())
+    df["stars"] = [_stars(q) if pd.notna(q) else "" for q in df["q"]]
+    return df
 
 
 def plot_lobe_bars(all_dep: pd.DataFrame, all_gt: pd.DataFrame, output_dir: Path, suffix: str = "") -> None:
-    model_lobes, gt_lobes = lobe_fraction_tables(all_dep, all_gt)
+    model_lobes, gt_lobes, area_lobes = lobe_fraction_tables(all_dep, all_gt)
     if model_lobes.empty:
         return
+    sig = lobe_significance_table(model_lobes, gt_lobes, area_lobes) if not gt_lobes.empty else pd.DataFrame()
+    x = np.arange(len(LOBES))
+
+    def _bar_stats(sub: pd.DataFrame) -> pd.DataFrame:
+        return sub.groupby("lobe")["fraction"].agg(["mean", "std"]).reindex(LOBES).fillna(0)
+
     for size_um in PARTICLE_SIZES_UM:
         fig, ax = plt.subplots(figsize=(8, 6))
-        x = np.arange(len(LOBES))
-        n_bars = len(MODEL_ORDER) + (0 if gt_lobes.empty else 1)
+        # bar slots: surface area (grey) | 3 kernels | ground truth
+        has_area = not area_lobes.empty
+        has_gt = not gt_lobes.empty and not gt_lobes[gt_lobes["particle_size"] == size_um].empty
+        n_bars = (1 if has_area else 0) + len(MODEL_ORDER) + (1 if has_gt else 0)
         width = 0.8 / n_bars
-        for i, model in enumerate(MODEL_ORDER):
+
+        def _annotate(slot: int, stats_df: pd.DataFrame, source: str) -> None:
+            if sig.empty or size_um not in STAT_SIZES:
+                return
+            for c, lobe in enumerate(LOBES):
+                row = sig[(sig["particle_size"] == size_um) & (sig["source"] == source) & (sig["lobe"] == lobe)]
+                if row.empty:
+                    continue
+                star = row["stars"].iloc[0]
+                if star in ("", "ns"):
+                    continue
+                top = stats_df["mean"].iloc[c] + stats_df["std"].iloc[c]
+                ax.text(x[c] + slot * width, top + 0.01, star, ha="center", va="bottom", fontsize=9)
+
+        slot = 0
+        if has_area:
+            stats_df = _bar_stats(area_lobes)
+            ax.bar(x + slot * width, stats_df["mean"], width=width, yerr=stats_df["std"],
+                   capsize=3, label="Surface area", color="gray", alpha=0.6)
+            _annotate(slot, stats_df, "surface_area")
+            slot += 1
+        for model in MODEL_ORDER:
             sub = model_lobes[(model_lobes["particle_size"] == size_um) & (model_lobes["model"] == model)]
             if sub.empty:
                 continue
-            stats_df = sub.groupby("lobe")["fraction"].agg(["mean", "std"]).reindex(LOBES).fillna(0)
-            ax.bar(x + i * width, stats_df["mean"], width=width, yerr=stats_df["std"],
+            stats_df = _bar_stats(sub)
+            ax.bar(x + slot * width, stats_df["mean"], width=width, yerr=stats_df["std"],
                    capsize=3, label=MODEL_LABELS[model], color=MODEL_COLORS[model])
-        if not gt_lobes.empty:
-            sub = gt_lobes[gt_lobes["particle_size"] == size_um]
-            if not sub.empty:
-                stats_df = sub.groupby("lobe")["fraction"].agg(["mean", "std"]).reindex(LOBES).fillna(0)
-                ax.bar(x + len(MODEL_ORDER) * width, stats_df["mean"], width=width,
-                       yerr=stats_df["std"], capsize=3, label="Ground Truth", color="#572F30")
+            _annotate(slot, stats_df, model)
+            slot += 1
+        if has_gt:
+            stats_df = _bar_stats(gt_lobes[gt_lobes["particle_size"] == size_um])
+            ax.bar(x + slot * width, stats_df["mean"], width=width, yerr=stats_df["std"],
+                   capsize=3, label="Ground Truth", color="#572F30")
+
         ax.set_xticks(x + width * (n_bars - 1) / 2)
         ax.set_xticklabels(LOBES, rotation=45, ha="right")
         ax.set_ylim(bottom=0)
@@ -423,35 +527,14 @@ def _stars(p: float) -> str:
 
 
 def plot_lobe_error_heatmaps(all_dep: pd.DataFrame, all_gt: pd.DataFrame, output_dir: Path, suffix: str = "") -> None:
-    model_lobes, gt_lobes = lobe_fraction_tables(all_dep, all_gt)
+    model_lobes, gt_lobes, area_lobes = lobe_fraction_tables(all_dep, all_gt)
     if model_lobes.empty or gt_lobes.empty:
         return
-    for size_um in [1.0, 2.0]:
-        records = []
-        for model in MODEL_ORDER:
-            for lobe in LOBES:
-                pred = model_lobes[
-                    (model_lobes["particle_size"] == size_um)
-                    & (model_lobes["model"] == model)
-                    & (model_lobes["lobe"] == lobe)
-                ][["mouse_id", "fraction"]]
-                gt = gt_lobes[
-                    (gt_lobes["particle_size"] == size_um)
-                    & (gt_lobes["lobe"] == lobe)
-                ][["mouse_id", "fraction"]]
-                merged = pred.merge(gt, on="mouse_id", suffixes=("_pred", "_gt"))
-                if merged.empty:
-                    mean_err = np.nan
-                    p_val = np.nan
-                else:
-                    diff = merged["fraction_pred"] - merged["fraction_gt"]
-                    mean_err = float(diff.mean() * 100.0)
-                    p_val = stats.ttest_rel(merged["fraction_pred"], merged["fraction_gt"]).pvalue if len(merged) > 1 else np.nan
-                records.append({"model": model, "lobe": lobe, "mean_err": mean_err, "p": p_val})
-        df = pd.DataFrame(records)
+    sig = lobe_significance_table(model_lobes, gt_lobes, area_lobes)
+    for size_um in STAT_SIZES:
+        df = sig[(sig["particle_size"] == size_um) & (sig["source"].isin(MODEL_ORDER))].rename(columns={"source": "model"})
         if df["mean_err"].notna().sum() == 0:
             continue
-        df["q"] = _bh_adjust(df["p"].to_numpy())
         matrix = df.pivot(index="model", columns="lobe", values="mean_err").reindex(index=MODEL_ORDER, columns=LOBES)
         qmat = df.pivot(index="model", columns="lobe", values="q").reindex(index=MODEL_ORDER, columns=LOBES)
         vmax = max(1.0, np.nanmax(np.abs(matrix.to_numpy())))
@@ -566,6 +649,131 @@ def plot_deposition_transition(output_dir: Path, csv_path: str | Path | None = N
     _save(fig, output_dir, "deposition_transition.png")
 
 
+def _total_capture_table(all_dep: pd.DataFrame) -> pd.DataFrame:
+    """Per (mouse, size, model) total captured fraction = sum of the model
+    deposition column over every airway segment."""
+    rows = []
+    for mouse_id, g in all_dep.groupby("mouse_id"):
+        for size_um in PARTICLE_SIZES_UM:
+            size_m = size_um * 1e-6
+            for model in MODEL_ORDER:
+                col = f"{model}_deposition_{size_m:.2e}"
+                if col in g:
+                    rows.append({
+                        "mouse_id": mouse_id,
+                        "particle_size": size_um,
+                        "model": model,
+                        "total_capture": float(g[col].sum()),
+                    })
+    return pd.DataFrame(rows)
+
+
+def _penetration_table(all_dep: pd.DataFrame, all_gt: pd.DataFrame) -> pd.DataFrame:
+    """Per (mouse, size, source) distal penetration T12 = P(generation >= 12 |
+    captured), for each model and the experimental ground truth."""
+    rows = []
+    for mouse_id, g in all_dep.groupby("mouse_id"):
+        for size_um in PARTICLE_SIZES_UM:
+            size_m = size_um * 1e-6
+            for model in MODEL_ORDER:
+                col = f"{model}_deposition_{size_m:.2e}"
+                if col not in g:
+                    continue
+                per_gen = g.groupby("generation")[col].sum()
+                total = per_gen.sum()
+                if total > 0:
+                    t12 = float(per_gen[per_gen.index >= 12].sum() / total)
+                    rows.append({"mouse_id": mouse_id, "particle_size": size_um,
+                                 "source": model, "t12": t12})
+    if not all_gt.empty:
+        for mouse_id, g in all_gt.groupby("mouse_id"):
+            sizes = g["gt_particle_size"].dropna()
+            if sizes.empty:
+                continue
+            size_um = float(sizes.iloc[0])
+            per_gen = g.groupby("generation")["probability"].sum()
+            total = per_gen.sum()
+            if total > 0:
+                t12 = float(per_gen[per_gen.index >= 12].sum() / total)
+                rows.append({"mouse_id": mouse_id, "particle_size": size_um,
+                             "source": "ground_truth", "t12": t12})
+    return pd.DataFrame(rows)
+
+
+def summarize_results(all_dep: pd.DataFrame, all_gt: pd.DataFrame,
+                      output_dir: Path, suffix: str = "") -> None:
+    """
+    Export the numeric results behind the paper's tables so the reported
+    values are reproducible, not just the figures:
+
+      * total capture (%) per particle size x impaction kernel
+      * distal penetration T12 = P(generation >= 12 | captured)
+      * lobe-wise signed errors with Wilcoxon signed-rank + Benjamini-Hochberg
+        significance (the same statistics drawn on the heatmaps)
+
+    Writes ``results_summary_*.csv`` plus a human-readable ``results_summary.txt``.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    lines: list[str] = ["Deposition model results summary", "=" * 33, ""]
+
+    cap = _total_capture_table(all_dep)
+    cap_summary = pd.DataFrame()
+    if not cap.empty:
+        cap_summary = (cap.groupby(["particle_size", "model"])["total_capture"]
+                       .agg(mean="mean", std="std", n="count").reset_index())
+        cap_summary["mean_pct"] = cap_summary["mean"] * 100.0
+        cap_summary["std_pct"] = cap_summary["std"] * 100.0
+        cap_summary.to_csv(output_dir / _suffix_name("results_summary_total_capture", suffix, ".csv"), index=False)
+        lines.append("Total capture (% of intake, cohort mean +/- SD)")
+        for size_um in PARTICLE_SIZES_UM:
+            lines.append(f"  {size_um:g} um:")
+            sub = cap_summary[cap_summary["particle_size"] == size_um]
+            for _, r in sub.iterrows():
+                lines.append(f"    {MODEL_LABELS.get(r['model'], r['model']):<12} "
+                             f"{r['mean_pct']:6.2f} +/- {r['std_pct']:5.2f}  (n={int(r['n'])})")
+        lines.append("")
+
+    pen = _penetration_table(all_dep, all_gt)
+    if not pen.empty:
+        pen_summary = (pen.groupby(["particle_size", "source"])["t12"]
+                       .agg(mean="mean", std="std", n="count").reset_index())
+        pen_summary["mean_pct"] = pen_summary["mean"] * 100.0
+        pen_summary.to_csv(output_dir / _suffix_name("results_summary_penetration_t12", suffix, ".csv"), index=False)
+        lines.append("Distal penetration T12 = P(gen >= 12 | captured), cohort mean %")
+        order = MODEL_ORDER + ["ground_truth"]
+        for size_um in PARTICLE_SIZES_UM:
+            lines.append(f"  {size_um:g} um:")
+            sub = pen_summary[pen_summary["particle_size"] == size_um]
+            for src in order:
+                row = sub[sub["source"] == src]
+                if not row.empty:
+                    label = "Ground truth" if src == "ground_truth" else MODEL_LABELS.get(src, src)
+                    lines.append(f"    {label:<12} {row['mean_pct'].iloc[0]:6.2f}")
+        lines.append("")
+
+    model_lobes, gt_lobes, area_lobes = lobe_fraction_tables(all_dep, all_gt)
+    if not model_lobes.empty and not gt_lobes.empty:
+        lobe_stats = lobe_significance_table(model_lobes, gt_lobes, area_lobes)
+        lobe_stats = lobe_stats.rename(columns={"mean_err": "mean_error_pp", "p": "p_wilcoxon", "q": "q_bh", "stars": "significance"})
+        lobe_stats.to_csv(output_dir / _suffix_name("results_summary_lobe_stats", suffix, ".csv"), index=False)
+        lines.append("Lobe-wise deposition-density signed error (pp) and BH-corrected Wilcoxon significance")
+        for size_um in STAT_SIZES:
+            lines.append(f"  {size_um:g} um:")
+            sub = lobe_stats[lobe_stats["particle_size"] == size_um]
+            for source in MODEL_ORDER + ["surface_area"]:
+                cells = []
+                for lobe in LOBES:
+                    r = sub[(sub["source"] == source) & (sub["lobe"] == lobe)]
+                    if not r.empty and pd.notna(r["mean_error_pp"].iloc[0]):
+                        cells.append(f"{lobe} {r['mean_error_pp'].iloc[0]:+.1f}{r['significance'].iloc[0]}")
+                label = "Surface area" if source == "surface_area" else MODEL_LABELS.get(source, source)
+                lines.append(f"    {label:<12} " + "  ".join(cells))
+        lines.append("")
+
+    (output_dir / _suffix_name("results_summary", suffix, ".txt")).write_text("\n".join(lines))
+
+
 def run_all_figures(
     results_path: str | Path,
     output_dir: str | Path = "outputs",
@@ -587,6 +795,7 @@ def run_all_figures(
     plot_lobe_bars(all_dep, all_gt, output_dir, suffix=suffix)
     plot_lobe_error_heatmaps(all_dep, all_gt, output_dir, suffix=suffix)
     plot_stk_impaction(all_dep, output_dir, suffix=suffix)
+    summarize_results(all_dep, all_gt, output_dir, suffix=suffix)
 
     if include_static is None:
         include_static = suffix == ""
